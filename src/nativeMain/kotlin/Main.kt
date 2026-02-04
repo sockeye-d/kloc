@@ -4,12 +4,15 @@ import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.core.main
 import com.github.ajalt.clikt.core.theme
+import com.github.ajalt.clikt.parameters.arguments.argument
+import com.github.ajalt.clikt.parameters.arguments.default
 import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.option
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.channels.produce
+import kotlinx.io.IOException
 import kotlinx.io.RawSource
 import kotlinx.io.Source
 import kotlinx.io.buffered
@@ -40,7 +43,7 @@ data class FileToScan(
 )
 
 class Kloc : CliktCommand(name = "kloc") {
-    val directory by option().default(".")
+    val directory by argument().default(".")
 
     override fun run() {
         try {
@@ -107,9 +110,12 @@ private suspend fun CoroutineScope.countLinesInDirectory(directory: String): Sca
         (1..workerCount).map { _ ->
             launch {
                 for ((source) in files) {
-                    val lines = countLines(source.buffered())
-                    if (lines != FILE_IS_BINARY) {
-                        lineCountChannel.send(lines)
+                    try {
+                        val lines = countLines(source.buffered())
+                        if (lines != FILE_IS_BINARY) {
+                            lineCountChannel.send(lines)
+                        }
+                    } catch (_: IOException) {
                     }
                 }
             }
@@ -140,16 +146,27 @@ suspend fun CoroutineScope.scanFilesInternal(
     level: Int = 0,
     onFileEmitted: suspend (FileToScan) -> Unit,
 ) {
-    for (child in SystemFileSystem.list(basePath)) {
+    val paths = try {
+        SystemFileSystem.list(basePath)
+    } catch (_: IOException) {
+        emptyList()
+    }
+    for (child in paths) {
         if (child.name.startsWith(".")) continue
-        val metadata = SystemFileSystem.metadataOrNull(child) ?: continue
+        val metadata = try {
+            SystemFileSystem.metadataOrNull(child)
+        } catch (_: Exception) {
+            null
+        } ?: continue
         if (metadata.isRegularFile) {
             if (metadata.size > 20_000_000) {
                 //println("Skipping ${child.name} (${metadata.size / 1_000_000} megabytes)")
             } else if (filenameIsGenerated(child.name)) {
                 //println("Skipping generated ${child.name}")
             } else {
-                onFileEmitted(FileToScan(SystemFileSystem.source(child), child, metadata))
+                try {
+                    onFileEmitted(FileToScan(SystemFileSystem.source(child), child, metadata))
+                } catch(_: Exception) {}
             }
         } else {
             if (level > 1) {
